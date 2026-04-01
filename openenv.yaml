@@ -1,0 +1,111 @@
+# openenv.yaml — Required metadata file for OpenEnv spec compliance.
+# Run `openenv validate` in the project root to verify this file.
+
+name: csv-cleaner
+version: "1.0.0"
+description: >
+  An OpenEnv environment where AI agents learn to clean messy CSV data.
+  Three tasks of increasing difficulty test an agent's ability to fill null
+  values, remove duplicates, normalize date and phone formats, cast column
+  types, and remove statistical outliers.
+
+tags:
+  - openenv
+  - data-cleaning
+  - csv
+  - real-world
+  - nlp
+
+author: ""
+license: MIT
+
+# The running server URL (update with your HF Space URL before submitting)
+base_url: "http://0.0.0.0:7860"
+
+# OpenEnv spec endpoints
+endpoints:
+  reset:  "POST /reset"
+  step:   "POST /step"
+  state:  "GET /state"
+
+# Task registry
+tasks:
+  - id: task1
+    name: "Fill Null Values"
+    difficulty: easy
+    max_steps: 10
+    description: >
+      Fill missing values in a customer CSV.
+      Target columns: age → 0, city → 'Unknown', email → 'noemail@example.com'.
+
+  - id: task2
+    name: "Deduplicate and Normalize Dates"
+    difficulty: medium
+    max_steps: 15
+    description: >
+      Remove exact duplicate rows, fill missing amounts with 0.0,
+      and normalize all order_date values to YYYY-MM-DD ISO format.
+
+  - id: task3
+    name: "Full Pipeline Clean"
+    difficulty: hard
+    max_steps: 20
+    description: >
+      Complete 6-step pipeline on an employee dataset:
+      remove duplicates, fill null salaries and departments,
+      normalize phone numbers to digits only,
+      normalize join dates to YYYY-MM-DD,
+      and remove salary outliers outside the range 0–500000.
+
+# Action space
+actions:
+  - name: fill_nulls
+    description: "Fill null values in a column with a given value"
+    parameters:
+      column: string
+      value: any
+
+  - name: remove_duplicates
+    description: "Remove exact duplicate rows from the CSV"
+    parameters: {}
+
+  - name: normalize_column
+    description: "Normalize column format (digits_only, lowercase, strip, title_case, iso_date)"
+    parameters:
+      column: string
+      format: string
+
+  - name: cast_column
+    description: "Cast column to a different type (int, float, str, date)"
+    parameters:
+      column: string
+      dtype: string
+
+  - name: remove_outliers
+    description: "Remove rows where column value is outside [min_val, max_val]"
+    parameters:
+      column: string
+      min_val: float
+      max_val: float
+
+  - name: noop
+    description: "Do nothing"
+    parameters: {}
+
+# Observation space
+observation:
+  rows:        "List of row dicts representing the current CSV state"
+  columns:     "List of column names"
+  goal:        "Plain-English description of the cleaning objective"
+  task_id:     "Active task identifier"
+  step_number: "Number of actions taken so far"
+  max_steps:   "Maximum steps allowed this episode"
+  done:        "True when the episode has ended"
+  info:        "Optional diagnostic information"
+
+# Reward
+reward:
+  score:  "Float in [0.0, 1.0] — current cleanliness score"
+  delta:  "Change in score from previous step"
+  reason: "Human-readable explanation of the score"
+  done:   "True when the episode should end"

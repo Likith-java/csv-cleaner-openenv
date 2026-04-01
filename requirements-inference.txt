@@ -1,0 +1,5 @@
+# Dependencies for inference.py (baseline agent)
+# Install with: pip install -r requirements-inference.txt
+
+openai>=1.30.0
+requests>=2.31.0
