@@ -1,8 +1,18 @@
 """
-server/app.py — App factory for the CSV Cleaner OpenEnv environment.
-This file is required by openenv validate for multi-mode deployment.
-The actual FastAPI app lives in main.py; this re-exports it.
+server/app.py — Required by openenv validate for multi-mode deployment.
 """
-from server.main import app
+import sys
+import os
 
-__all__ = ["app"]
+sys.path.insert(0, os.path.dirname(__file__))
+
+from main import app
+import uvicorn
+
+
+def main():
+    uvicorn.run(app, host="0.0.0.0", port=7860)
+
+
+if __name__ == "__main__":
+    main()
