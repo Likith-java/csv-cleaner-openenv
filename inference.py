@@ -13,6 +13,11 @@ Usage:
 
 The script must be named inference.py and placed in the project root.
 All LLM calls use the OpenAI client pointed at API_BASE_URL.
+
+Stdout format (required by automated scorer):
+    [START] task_id=<id> max_steps=<n>
+    [STEP]  task_id=<id> step=<n> action=<type> score=<f> delta=<f> done=<bool>
+    [END]   task_id=<id> final_score=<f> steps=<n>
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ TEMPERATURE: float = 0.0   # deterministic for reproducibility
 FALLBACK_ACTION    = {"action_type": "noop"}
 
 # ---------------------------------------------------------------------------
-# System prompt — tells the LLM exactly what to do
+# System prompt
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """You are a data cleaning agent. You will be shown a dirty CSV dataset and a cleaning goal.
@@ -91,7 +96,6 @@ client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 # ---------------------------------------------------------------------------
 
 def env_reset(task_id: str) -> Dict[str, Any]:
-    """Call POST /reset on the environment server."""
     resp = requests.post(
         f"{ENV_BASE_URL}/reset",
         json={"task_id": task_id},
@@ -102,7 +106,6 @@ def env_reset(task_id: str) -> Dict[str, Any]:
 
 
 def env_step(action: Dict[str, Any]) -> Dict[str, Any]:
-    """Call POST /step on the environment server."""
     resp = requests.post(
         f"{ENV_BASE_URL}/step",
         json=action,
@@ -113,7 +116,6 @@ def env_step(action: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def env_tasks() -> List[Dict[str, Any]]:
-    """Call GET /tasks to list available tasks."""
     resp = requests.get(f"{ENV_BASE_URL}/tasks", timeout=30)
     resp.raise_for_status()
     return resp.json()
@@ -128,15 +130,11 @@ def build_user_prompt(
     last_reward:  Optional[Dict[str, Any]],
     step:         int,
 ) -> str:
-    """Build the user message shown to the LLM each step."""
-
     rows    = observation.get("rows", [])
     columns = observation.get("columns", [])
     goal    = observation.get("goal", "")
     task_id = observation.get("task_id", "")
-    done    = observation.get("done", False)
 
-    # Show at most 12 rows so the prompt doesn't explode in size
     display_rows = rows[:12]
     rows_json    = json.dumps(display_rows, indent=2)
     total_rows   = len(rows)
@@ -169,7 +167,6 @@ Output ONLY a JSON object."""
 # ---------------------------------------------------------------------------
 
 def call_llm(user_prompt: str) -> str:
-    """Call the LLM and return the raw response text."""
     try:
         completion = client.chat.completions.create(
             model       = MODEL_NAME,
@@ -188,14 +185,9 @@ def call_llm(user_prompt: str) -> str:
 
 
 def parse_action(response_text: str) -> Dict[str, Any]:
-    """
-    Extract a JSON action from the LLM response.
-    Tries strict JSON parse first, then falls back to regex extraction.
-    """
     if not response_text:
         return FALLBACK_ACTION
 
-    # 1. Try direct parse (model returned clean JSON)
     try:
         parsed = json.loads(response_text.strip())
         if isinstance(parsed, dict) and "action_type" in parsed:
@@ -203,7 +195,6 @@ def parse_action(response_text: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    # 2. Try extracting a JSON object from within the text
     match = re.search(r"\{[^{}]*\"action_type\"[^{}]*\}", response_text, re.DOTALL)
     if match:
         try:
@@ -222,15 +213,11 @@ def parse_action(response_text: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def run_task(task_id: str) -> float:
-    """
-    Run one full episode on the given task.
-    Returns the final score (0.0–1.0).
-    """
+    """Run one full episode. Returns final score 0.0-1.0."""
     print(f"\n{'='*60}")
     print(f"  TASK: {task_id}")
     print(f"{'='*60}")
 
-    # Reset environment
     try:
         observation = env_reset(task_id)
     except Exception as exc:
@@ -238,28 +225,28 @@ def run_task(task_id: str) -> float:
         return 0.0
 
     print(f"  Goal: {observation.get('goal', '')[:120]}...")
-    print(f"  Max steps: {observation.get('max_steps', '?')}")
+    max_steps = observation.get("max_steps", 20)
+    print(f"  Max steps: {max_steps}")
     print()
+
+    # ── Structured log: START ──────────────────────────────────────
+    print(f"[START] task_id={task_id} max_steps={max_steps}")
 
     last_reward: Optional[Dict[str, Any]] = None
     final_score: float = 0.0
     step = 0
-
-    max_steps = observation.get("max_steps", 20)
 
     for step in range(1, max_steps + 1):
         if observation.get("done", False):
             print(f"  Episode done at step {step - 1}.")
             break
 
-        # Build prompt and call LLM
-        user_prompt = build_user_prompt(observation, last_reward, step)
+        user_prompt  = build_user_prompt(observation, last_reward, step)
         raw_response = call_llm(user_prompt)
-        action = parse_action(raw_response)
+        action       = parse_action(raw_response)
 
         print(f"  Step {step:2d} | action: {json.dumps(action)}")
 
-        # Send action to environment
         try:
             result      = env_step(action)
             observation = result["observation"]
@@ -276,6 +263,14 @@ def run_task(task_id: str) -> float:
                 f"{'DONE' if done else ''}  {reason}"
             )
 
+            # ── Structured log: STEP ───────────────────────────────
+            print(
+                f"[STEP] task_id={task_id} step={step} "
+                f"action={action.get('action_type', 'noop')} "
+                f"score={final_score:.4f} delta={delta:+.4f} "
+                f"done={str(done).lower()}"
+            )
+
             if done:
                 break
 
@@ -283,15 +278,16 @@ def run_task(task_id: str) -> float:
             print(f"  [ERROR] step failed: {exc}")
             break
 
-        # Small delay to avoid hammering the LLM API
         time.sleep(0.5)
 
+    # ── Structured log: END ────────────────────────────────────────
+    print(f"[END] task_id={task_id} final_score={final_score:.4f} steps={step}")
     print(f"\n  Final score for {task_id}: {final_score:.4f}")
     return final_score
 
 
 # ---------------------------------------------------------------------------
-# Main — run all tasks and report
+# Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -311,7 +307,6 @@ def main() -> None:
     global ENV_BASE_URL
     ENV_BASE_URL = args.base_url.rstrip("/")
 
-    # Validate env vars
     if not API_KEY:
         print(
             "ERROR: HF_TOKEN (or API_KEY) environment variable is not set.\n"
@@ -325,7 +320,6 @@ def main() -> None:
     print(f"API URL    : {API_BASE_URL}")
     print(f"Server URL : {ENV_BASE_URL}")
 
-    # Discover tasks from the environment
     try:
         all_tasks = env_tasks()
         task_ids  = [t["id"] for t in all_tasks]
@@ -333,19 +327,16 @@ def main() -> None:
         print(f"Could not fetch tasks from server: {exc}")
         task_ids = ["task1", "task2", "task3"]
 
-    # Filter to a single task if requested
     if args.task:
         if args.task not in task_ids:
             print(f"ERROR: Unknown task '{args.task}'. Available: {task_ids}")
             sys.exit(1)
         task_ids = [args.task]
 
-    # Run all selected tasks
     scores: Dict[str, float] = {}
     for task_id in task_ids:
         scores[task_id] = run_task(task_id)
 
-    # Final summary
     print(f"\n{'='*60}")
     print("  BASELINE RESULTS")
     print(f"{'='*60}")
