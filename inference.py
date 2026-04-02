@@ -1,23 +1,15 @@
 """
 inference.py — Baseline agent for the CSV Cleaner OpenEnv environment.
 
-MANDATORY environment variables (set before running):
-    API_BASE_URL   The API endpoint for the LLM  (e.g. https://router.huggingface.co/v1)
-    MODEL_NAME     The model identifier           (e.g. meta-llama/Llama-3.3-70B-Instruct)
-    HF_TOKEN       Your HuggingFace API key
+MANDATORY environment variables:
+    API_BASE_URL   The API endpoint for the LLM.
+    MODEL_NAME     The model identifier to use for inference.
+    HF_TOKEN       Your Hugging Face / API key.
 
-Usage:
-    python inference.py                          # runs all 3 tasks against local server
-    python inference.py --base-url http://...    # override server URL
-    TASK_ID=task2 python inference.py            # run a single task
-
-The script must be named inference.py and placed in the project root.
-All LLM calls use the OpenAI client pointed at API_BASE_URL.
-
-Stdout format (required by automated scorer):
-    [START] task_id=<id> max_steps=<n>
-    [STEP]  task_id=<id> step=<n> action=<type> score=<f> delta=<f> done=<bool>
-    [END]   task_id=<id> final_score=<f> steps=<n>
+STDOUT FORMAT (required by automated scorer):
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
 """
 
 from __future__ import annotations
@@ -34,19 +26,46 @@ import requests
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# Configuration — read from environment variables (required by spec)
+# Configuration
 # ---------------------------------------------------------------------------
 
-API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_BASE_URL: str = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 API_KEY:      str = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
-MODEL_NAME:   str = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-
-# Where the OpenEnv server is running
+MODEL_NAME:   str = os.getenv("MODEL_NAME") or "meta-llama/Llama-3.3-70B-Instruct"
 ENV_BASE_URL: str = os.getenv("ENV_BASE_URL", "http://0.0.0.0:7860")
 
-MAX_TOKENS:  int   = 256
-TEMPERATURE: float = 0.0   # deterministic for reproducibility
-FALLBACK_ACTION    = {"action_type": "noop"}
+BENCHMARK           = "csv-cleaner"
+MAX_TOKENS:  int    = 256
+TEMPERATURE: float  = 0.0
+SUCCESS_THRESHOLD   = 0.5   # score >= 0.5 counts as success
+FALLBACK_ACTION     = {"action_type": "noop"}
+
+# ---------------------------------------------------------------------------
+# Structured log helpers (exact format required by scorer)
+# ---------------------------------------------------------------------------
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} "
+        f"done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -75,13 +94,12 @@ Available actions (pick exactly one):
 5. Remove outlier rows by value range:
    {"action_type": "remove_outliers", "column": "<col>", "min_val": <num>, "max_val": <num>}
 
-6. Do nothing:
+6. Do nothing (only when task is complete):
    {"action_type": "noop"}
 
 Rules:
 - Output ONLY a valid JSON object. No explanation, no markdown, no extra text.
 - Tackle ONE issue at a time.
-- Look at the goal carefully and the current state of the rows.
 - When the goal is fully achieved, output {"action_type": "noop"}.
 """
 
@@ -127,8 +145,8 @@ def env_tasks() -> List[Dict[str, Any]]:
 
 def build_user_prompt(
     observation: Dict[str, Any],
-    last_reward:  Optional[Dict[str, Any]],
-    step:         int,
+    last_reward: Optional[float],
+    step: int,
 ) -> str:
     rows    = observation.get("rows", [])
     columns = observation.get("columns", [])
@@ -139,27 +157,18 @@ def build_user_prompt(
     rows_json    = json.dumps(display_rows, indent=2)
     total_rows   = len(rows)
 
-    reward_info = ""
-    if last_reward:
-        reward_info = (
-            f"\nLast action result:\n"
-            f"  Score : {last_reward.get('score', 0):.4f}\n"
-            f"  Delta : {last_reward.get('delta', 0):+.4f}\n"
-            f"  Reason: {last_reward.get('reason', '')}\n"
-        )
+    reward_line = f"\nLast reward: {last_reward:.4f}\n" if last_reward is not None else ""
 
-    prompt = f"""Task: {task_id}  |  Step: {step}
+    return f"""Task: {task_id}  |  Step: {step}
 Goal:
 {goal}
-{reward_info}
+{reward_line}
 Current CSV state ({total_rows} rows, columns: {columns}):
 {rows_json}
 {"[... showing first 12 rows only ...]" if total_rows > 12 else ""}
 
 What is the next single cleaning action to take?
-Output ONLY a JSON object."""
-
-    return prompt.strip()
+Output ONLY a JSON object.""".strip()
 
 
 # ---------------------------------------------------------------------------
@@ -169,18 +178,18 @@ Output ONLY a JSON object."""
 def call_llm(user_prompt: str) -> str:
     try:
         completion = client.chat.completions.create(
-            model       = MODEL_NAME,
-            messages    = [
+            model=MODEL_NAME,
+            messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": user_prompt},
             ],
-            temperature = TEMPERATURE,
-            max_tokens  = MAX_TOKENS,
-            stream      = False,
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            stream=False,
         )
         return completion.choices[0].message.content or ""
     except Exception as exc:
-        print(f"  [LLM ERROR] {exc}")
+        print(f"[DEBUG] LLM request failed: {exc}", flush=True)
         return ""
 
 
@@ -204,7 +213,7 @@ def parse_action(response_text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    print(f"  [PARSE WARN] Could not extract action from: {response_text[:120]!r}")
+    print(f"[DEBUG] Could not parse action from: {response_text[:120]!r}", flush=True)
     return FALLBACK_ACTION
 
 
@@ -214,75 +223,72 @@ def parse_action(response_text: str) -> Dict[str, Any]:
 
 def run_task(task_id: str) -> float:
     """Run one full episode. Returns final score 0.0-1.0."""
-    print(f"\n{'='*60}")
-    print(f"  TASK: {task_id}")
-    print(f"{'='*60}")
 
+    # Reset environment
     try:
         observation = env_reset(task_id)
     except Exception as exc:
-        print(f"  [ERROR] Failed to reset environment: {exc}")
+        print(f"[DEBUG] Failed to reset {task_id}: {exc}", flush=True)
+        log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+        log_end(success=False, steps=0, score=0.0, rewards=[])
         return 0.0
 
-    print(f"  Goal: {observation.get('goal', '')[:120]}...")
-    max_steps = observation.get("max_steps", 20)
-    print(f"  Max steps: {max_steps}")
-    print()
-
-    # ── Structured log: START ──────────────────────────────────────
-    print(f"[START] task_id={task_id} max_steps={max_steps}")
-
-    last_reward: Optional[Dict[str, Any]] = None
+    max_steps   = observation.get("max_steps", 20)
+    last_reward: Optional[float] = None
     final_score: float = 0.0
-    step = 0
+    rewards:     List[float] = []
+    steps_taken: int = 0
+    success:     bool = False
 
-    for step in range(1, max_steps + 1):
-        if observation.get("done", False):
-            print(f"  Episode done at step {step - 1}.")
-            break
+    # ── [START] ────────────────────────────────────────────────────
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-        user_prompt  = build_user_prompt(observation, last_reward, step)
-        raw_response = call_llm(user_prompt)
-        action       = parse_action(raw_response)
+    try:
+        for step in range(1, max_steps + 1):
+            if observation.get("done", False):
+                break
 
-        print(f"  Step {step:2d} | action: {json.dumps(action)}")
+            user_prompt  = build_user_prompt(observation, last_reward, step)
+            raw_response = call_llm(user_prompt)
+            action       = parse_action(raw_response)
+            action_str   = json.dumps(action)
 
-        try:
-            result      = env_step(action)
-            observation = result["observation"]
-            reward      = result["reward"]
-            last_reward = reward
-            final_score = reward.get("score", 0.0)
-            delta       = reward.get("delta", 0.0)
-            reason      = reward.get("reason", "")[:80]
-            done        = reward.get("done", False)
+            error_msg: Optional[str] = None
+            try:
+                result      = env_step(action)
+                observation = result["observation"]
+                reward_obj  = result["reward"]
+                reward      = float(reward_obj.get("score", 0.0))
+                done        = bool(reward_obj.get("done", False))
+                final_score = reward
+                last_reward = reward
+                rewards.append(reward)
+                steps_taken = step
 
-            print(
-                f"          score={final_score:.4f}  "
-                f"delta={delta:+.4f}  "
-                f"{'DONE' if done else ''}  {reason}"
-            )
+            except Exception as exc:
+                error_msg = str(exc)
+                done      = False
+                reward    = 0.0
+                rewards.append(reward)
+                steps_taken = step
+                print(f"[DEBUG] step failed: {exc}", flush=True)
 
-            # ── Structured log: STEP ───────────────────────────────
-            print(
-                f"[STEP] task_id={task_id} step={step} "
-                f"action={action.get('action_type', 'noop')} "
-                f"score={final_score:.4f} delta={delta:+.4f} "
-                f"done={str(done).lower()}"
-            )
+            # ── [STEP] ────────────────────────────────────────────
+            log_step(step=step, action=action_str, reward=reward,
+                     done=done, error=error_msg)
 
             if done:
                 break
 
-        except Exception as exc:
-            print(f"  [ERROR] step failed: {exc}")
-            break
+            time.sleep(0.3)
 
-        time.sleep(0.5)
+        success = final_score >= SUCCESS_THRESHOLD
 
-    # ── Structured log: END ────────────────────────────────────────
-    print(f"[END] task_id={task_id} final_score={final_score:.4f} steps={step}")
-    print(f"\n  Final score for {task_id}: {final_score:.4f}")
+    finally:
+        # ── [END] ─────────────────────────────────────────────────
+        log_end(success=success, steps=steps_taken,
+                score=final_score, rewards=rewards)
+
     return final_score
 
 
@@ -300,7 +306,7 @@ def main() -> None:
     parser.add_argument(
         "--task",
         default=os.getenv("TASK_ID", ""),
-        help="Run a single task ID (task1/task2/task3). Default: run all.",
+        help="Run a single task (task1/task2/task3). Default: all.",
     )
     args = parser.parse_args()
 
@@ -309,27 +315,25 @@ def main() -> None:
 
     if not API_KEY:
         print(
-            "ERROR: HF_TOKEN (or API_KEY) environment variable is not set.\n"
-            "Export it before running:\n"
-            "  export HF_TOKEN=hf_...",
+            "ERROR: HF_TOKEN (or API_KEY) environment variable is not set.",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    print(f"Model      : {MODEL_NAME}")
-    print(f"API URL    : {API_BASE_URL}")
-    print(f"Server URL : {ENV_BASE_URL}")
+    print(f"[DEBUG] model={MODEL_NAME} api={API_BASE_URL} server={ENV_BASE_URL}",
+          flush=True)
 
     try:
         all_tasks = env_tasks()
         task_ids  = [t["id"] for t in all_tasks]
     except Exception as exc:
-        print(f"Could not fetch tasks from server: {exc}")
+        print(f"[DEBUG] Could not fetch tasks: {exc}", flush=True)
         task_ids = ["task1", "task2", "task3"]
 
     if args.task:
         if args.task not in task_ids:
-            print(f"ERROR: Unknown task '{args.task}'. Available: {task_ids}")
+            print(f"ERROR: Unknown task '{args.task}'. Available: {task_ids}",
+                  file=sys.stderr)
             sys.exit(1)
         task_ids = [args.task]
 
@@ -337,6 +341,7 @@ def main() -> None:
     for task_id in task_ids:
         scores[task_id] = run_task(task_id)
 
+    # Human-readable summary
     print(f"\n{'='*60}")
     print("  BASELINE RESULTS")
     print(f"{'='*60}")
@@ -344,7 +349,6 @@ def main() -> None:
         bar   = "█" * int(score * 20)
         empty = "░" * (20 - int(score * 20))
         print(f"  {task_id}  [{bar}{empty}]  {score:.4f}")
-
     avg = sum(scores.values()) / len(scores) if scores else 0.0
     print(f"\n  Average score: {avg:.4f}")
     print(f"{'='*60}\n")
