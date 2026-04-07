@@ -297,6 +297,8 @@ def run_task(task_id: str) -> float:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global ENV_BASE_URL
+
     parser = argparse.ArgumentParser(description="CSV Cleaner OpenEnv baseline agent")
     parser.add_argument(
         "--base-url",
@@ -310,7 +312,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    global ENV_BASE_URL
     ENV_BASE_URL = args.base_url.rstrip("/")
 
     if not API_KEY:
