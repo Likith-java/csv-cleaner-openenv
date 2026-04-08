@@ -18,13 +18,24 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
-import urllib.request
-import urllib.error
 from typing import Any, Dict, List, Optional
 
+# Auto-install missing dependencies so the validator can run inference.py directly
+def _ensure_deps():
+    required = ["openai", "requests"]
+    for pkg in required:
+        try:
+            __import__(pkg)
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
+
+_ensure_deps()
+
 from openai import OpenAI
+import requests
 
 # ---------------------------------------------------------------------------
 # Configuration
