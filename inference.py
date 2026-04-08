@@ -18,9 +18,21 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional
+
+# Auto-install missing dependencies so the script works in any clean environment
+def _ensure(pkg: str, import_name: str | None = None) -> None:
+    name = import_name or pkg
+    try:
+        __import__(name)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
+
+_ensure("requests")
+_ensure("openai")
 
 import requests
 from openai import OpenAI
@@ -29,9 +41,9 @@ from openai import OpenAI
 # Configuration
 # ---------------------------------------------------------------------------
 
-API_BASE_URL: str = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-API_KEY:      str = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
-MODEL_NAME:   str = os.getenv("MODEL_NAME") or "meta-llama/Llama-3.3-70B-Instruct"
+API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY:      str = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+MODEL_NAME:   str = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 ENV_BASE_URL: str = os.getenv("ENV_BASE_URL", "http://0.0.0.0:7860")
 
 BENCHMARK           = "csv-cleaner"
