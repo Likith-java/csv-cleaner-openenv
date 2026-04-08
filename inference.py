@@ -44,7 +44,7 @@ from openai import OpenAI
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY:      str = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME:   str = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-ENV_BASE_URL: str = os.getenv("ENV_BASE_URL", "http://0.0.0.0:7860")
+ENV_BASE_URL: str = os.getenv("ENV_BASE_URL", "https://Likith-java-csv-cleaner-openenv.hf.space")
 
 BENCHMARK           = "csv-cleaner"
 MAX_TOKENS:  int    = 256
