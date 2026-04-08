@@ -14,47 +14,26 @@ STDOUT FORMAT:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import time
+import urllib.request
+import urllib.error
 from typing import Any, Dict, List, Optional
 
-
-# ---------------------------------------------------------------------------
-# Auto-install dependencies in clean validator environments
-# ---------------------------------------------------------------------------
-def _ensure(pkg: str, import_name: str | None = None) -> None:
-    name = import_name or pkg
-    try:
-        __import__(name)
-    except ImportError:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", pkg, "-q",
-             "--no-warn-script-location"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-_ensure("requests")
-_ensure("openai")
-
-import requests
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# Configuration — read from environment variables
+# Configuration
 # ---------------------------------------------------------------------------
 
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME:   str = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 API_KEY:      str = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or ""
 ENV_BASE_URL: str = os.getenv("ENV_BASE_URL", "https://Likith-java-csv-cleaner-openenv.hf.space")
-
-# Optional — if using from_docker_image():
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 BENCHMARK          = "csv-cleaner"
 MAX_TOKENS:  int   = 256
@@ -63,7 +42,7 @@ SUCCESS_THRESHOLD  = 0.5
 FALLBACK_ACTION    = {"action_type": "noop"}
 
 # ---------------------------------------------------------------------------
-# Structured log helpers (exact format required by scorer)
+# Structured log helpers
 # ---------------------------------------------------------------------------
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -87,7 +66,6 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
         f"score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
-
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -126,40 +104,43 @@ Rules:
 """
 
 # ---------------------------------------------------------------------------
-# OpenAI client — configured via environment variables
+# OpenAI client
 # ---------------------------------------------------------------------------
 
 client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
 # ---------------------------------------------------------------------------
-# Environment HTTP helpers
+# Environment HTTP helpers — using urllib (stdlib, no extra deps)
 # ---------------------------------------------------------------------------
 
-def env_reset(task_id: str) -> Dict[str, Any]:
-    resp = requests.post(
-        f"{ENV_BASE_URL}/reset",
-        json={"task_id": task_id},
-        timeout=60,
+def _http_post(url: str, body: Dict) -> Dict:
+    data = json.dumps(body).encode("utf-8")
+    req  = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    resp.raise_for_status()
-    return resp.json()
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_get(url: str) -> Any:
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def env_reset(task_id: str) -> Dict[str, Any]:
+    return _http_post(f"{ENV_BASE_URL}/reset", {"task_id": task_id})
 
 
 def env_step(action: Dict[str, Any]) -> Dict[str, Any]:
-    resp = requests.post(
-        f"{ENV_BASE_URL}/step",
-        json=action,
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _http_post(f"{ENV_BASE_URL}/step", action)
 
 
 def env_tasks() -> List[Dict[str, Any]]:
-    resp = requests.get(f"{ENV_BASE_URL}/tasks", timeout=60)
-    resp.raise_for_status()
-    return resp.json()
-
+    return _http_get(f"{ENV_BASE_URL}/tasks")
 
 # ---------------------------------------------------------------------------
 # Prompt builder
@@ -175,9 +156,10 @@ def build_user_prompt(
     goal    = observation.get("goal", "")
     task_id = observation.get("task_id", "")
 
-    rows_json  = json.dumps(rows[:12], indent=2)
-    total_rows = len(rows)
-    reward_line = f"\nLast reward: {last_reward:.4f}\n" if last_reward is not None else ""
+    display_rows = rows[:12]
+    rows_json    = json.dumps(display_rows, indent=2)
+    total_rows   = len(rows)
+    reward_line  = f"\nLast reward: {last_reward:.4f}\n" if last_reward is not None else ""
 
     return f"""Task: {task_id}  |  Step: {step}
 Goal:
@@ -189,7 +171,6 @@ Current CSV state ({total_rows} rows, columns: {columns}):
 
 What is the next single cleaning action to take?
 Output ONLY a JSON object.""".strip()
-
 
 # ---------------------------------------------------------------------------
 # LLM call + action parser
@@ -230,16 +211,16 @@ def parse_action(response_text: str) -> Dict[str, Any]:
                 return parsed
         except json.JSONDecodeError:
             pass
-    print(f"[DEBUG] Could not parse action from: {response_text[:80]!r}", flush=True)
+    print(f"[DEBUG] Could not parse action from: {response_text[:120]!r}", flush=True)
     return FALLBACK_ACTION
-
 
 # ---------------------------------------------------------------------------
 # Single task runner
 # ---------------------------------------------------------------------------
 
 def run_task(task_id: str) -> float:
-    """Run one full episode. Returns final score 0.0-1.0."""
+    global ENV_BASE_URL
+
     try:
         observation = env_reset(task_id)
     except Exception as exc:
@@ -268,9 +249,6 @@ def run_task(task_id: str) -> float:
             action_str   = json.dumps(action)
 
             error_msg: Optional[str] = None
-            reward:    float = 0.0
-            done:      bool  = False
-
             try:
                 result      = env_step(action)
                 observation = result["observation"]
@@ -279,12 +257,15 @@ def run_task(task_id: str) -> float:
                 done        = bool(reward_obj.get("done", False))
                 final_score = reward
                 last_reward = reward
+                rewards.append(reward)
+                steps_taken = step
             except Exception as exc:
-                error_msg = str(exc)[:80]
+                error_msg = str(exc)
+                done      = False
+                reward    = 0.0
+                rewards.append(reward)
+                steps_taken = step
                 print(f"[DEBUG] step failed: {exc}", flush=True)
-
-            rewards.append(reward)
-            steps_taken = step
 
             log_step(step=step, action=action_str, reward=reward,
                      done=done, error=error_msg)
@@ -296,15 +277,11 @@ def run_task(task_id: str) -> float:
 
         success = final_score >= SUCCESS_THRESHOLD
 
-    except Exception as exc:
-        print(f"[DEBUG] episode error: {exc}", flush=True)
-
     finally:
         log_end(success=success, steps=steps_taken,
                 score=final_score, rewards=rewards)
 
     return final_score
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -313,10 +290,26 @@ def run_task(task_id: str) -> float:
 def main() -> None:
     global ENV_BASE_URL
 
-    print(f"[DEBUG] model={MODEL_NAME} api={API_BASE_URL} server={ENV_BASE_URL}",
-          flush=True)
+    parser = argparse.ArgumentParser(description="CSV Cleaner OpenEnv baseline agent")
+    parser.add_argument(
+        "--base-url",
+        default=ENV_BASE_URL,
+        help="Environment server base URL",
+    )
+    parser.add_argument(
+        "--task",
+        default=os.getenv("TASK_ID", ""),
+        help="Run a single task (task1/task2/task3). Default: all.",
+    )
+    args = parser.parse_args()
+    ENV_BASE_URL = args.base_url.rstrip("/")
 
-    # Discover tasks
+    if not API_KEY:
+        print("ERROR: HF_TOKEN is not set.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[DEBUG] model={MODEL_NAME} api={API_BASE_URL} server={ENV_BASE_URL}", flush=True)
+
     try:
         all_tasks = env_tasks()
         task_ids  = [t["id"] for t in all_tasks]
@@ -324,22 +317,26 @@ def main() -> None:
         print(f"[DEBUG] Could not fetch tasks: {exc}", flush=True)
         task_ids = ["task1", "task2", "task3"]
 
-    # Run all tasks
+    if args.task:
+        if args.task not in task_ids:
+            print(f"ERROR: Unknown task '{args.task}'.", file=sys.stderr)
+            sys.exit(1)
+        task_ids = [args.task]
+
     scores: Dict[str, float] = {}
     for task_id in task_ids:
         scores[task_id] = run_task(task_id)
 
-    # Summary
-    print(f"\n{'='*60}", flush=True)
-    print("  BASELINE RESULTS", flush=True)
-    print(f"{'='*60}", flush=True)
+    print(f"\n{'='*60}")
+    print("  BASELINE RESULTS")
+    print(f"{'='*60}")
     for task_id, score in scores.items():
         bar   = "█" * int(score * 20)
         empty = "░" * (20 - int(score * 20))
-        print(f"  {task_id}  [{bar}{empty}]  {score:.4f}", flush=True)
+        print(f"  {task_id}  [{bar}{empty}]  {score:.4f}")
     avg = sum(scores.values()) / len(scores) if scores else 0.0
-    print(f"\n  Average score: {avg:.4f}", flush=True)
-    print(f"{'='*60}\n", flush=True)
+    print(f"\n  Average score: {avg:.4f}")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":
