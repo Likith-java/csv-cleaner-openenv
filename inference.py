@@ -14,24 +14,25 @@ STDOUT FORMAT:
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
+# Install openai before importing — validator runs in a clean environment
+subprocess.check_call(
+    [sys.executable, "-m", "pip", "install", "openai>=1.30.0", "-q",
+     "--disable-pip-version-check"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
 import argparse
 import json
 import os
 import re
-import sys
 import time
 import urllib.request
 import urllib.error
 from typing import Any, Dict, List, Optional
-
-import subprocess as _sp
-import sys as _sys
-for _pkg in ["openai"]:
-    try:
-        __import__(_pkg)
-    except ImportError:
-        _sp.check_call([_sys.executable, "-m", "pip", "install", _pkg, "-q",
-                        "--user", "--no-warn-script-location"])
 
 from openai import OpenAI
 
@@ -47,14 +48,14 @@ ENV_BASE_URL: str = os.getenv(
     "https://Likith-java-csv-cleaner-openenv.hf.space"
 )
 
-BENCHMARK         = "csv-cleaner"
-MAX_TOKENS:  int  = 256
+BENCHMARK          = "csv-cleaner"
+MAX_TOKENS:  int   = 256
 TEMPERATURE: float = 0.0
 SUCCESS_THRESHOLD  = 0.5
 FALLBACK_ACTION    = {"action_type": "noop"}
 
 # ---------------------------------------------------------------------------
-# Structured log helpers (exact format required by scorer)
+# Structured log helpers
 # ---------------------------------------------------------------------------
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -62,19 +63,17 @@ def log_start(task: str, env: str, model: str) -> None:
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
-    error_val = error if error else "null"
     print(
         f"[STEP] step={step} action={action} reward={reward:.2f} "
-        f"done={str(done).lower()} error={error_val}",
+        f"done={str(done).lower()} error={error if error else 'null'}",
         flush=True,
     )
 
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
         f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.3f} rewards={rewards_str}",
+        f"score={score:.3f} rewards={','.join(f'{r:.2f}' for r in rewards)}",
         flush=True,
     )
 
@@ -122,14 +121,13 @@ Rules:
 client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
 # ---------------------------------------------------------------------------
-# Environment HTTP helpers (stdlib urllib — zero extra deps)
+# Environment HTTP helpers (stdlib urllib — no extra deps)
 # ---------------------------------------------------------------------------
 
 def _post(url: str, body: Dict) -> Dict:
     data = json.dumps(body).encode("utf-8")
     req  = urllib.request.Request(
-        url,
-        data=data,
+        url, data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -138,8 +136,7 @@ def _post(url: str, body: Dict) -> Dict:
 
 
 def _get(url: str) -> Any:
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(url, timeout=60) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -164,11 +161,10 @@ def build_user_prompt(
     last_reward: Optional[float],
     step: int,
 ) -> str:
-    rows       = observation.get("rows", [])
-    columns    = observation.get("columns", [])
-    goal       = observation.get("goal", "")
-    task_id    = observation.get("task_id", "")
-    rows_json  = json.dumps(rows[:12], indent=2)
+    rows    = observation.get("rows", [])
+    columns = observation.get("columns", [])
+    goal    = observation.get("goal", "")
+    task_id = observation.get("task_id", "")
     reward_line = f"\nLast reward: {last_reward:.4f}\n" if last_reward is not None else ""
 
     return (
@@ -176,7 +172,7 @@ def build_user_prompt(
         f"Goal:\n{goal}\n"
         f"{reward_line}\n"
         f"Current CSV state ({len(rows)} rows, columns: {columns}):\n"
-        f"{rows_json}\n"
+        f"{json.dumps(rows[:12], indent=2)}\n"
         f"{'[... showing first 12 rows only ...]' if len(rows) > 12 else ''}\n\n"
         f"What is the next single cleaning action to take?\n"
         f"Output ONLY a JSON object."
@@ -231,7 +227,6 @@ def parse_action(response_text: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def run_task(task_id: str) -> float:
-    """Run one full episode. Always emits START and END log lines."""
     rewards:     List[float] = []
     steps_taken: int = 0
     final_score: float = 0.0
@@ -258,13 +253,13 @@ def run_task(task_id: str) -> float:
             raw_response = call_llm(user_prompt)
             action       = parse_action(raw_response)
             action_str   = json.dumps(action)
-            error_msg: Optional[str] = None
-            reward: float = 0.0
-            done:   bool  = False
+            error_msg:   Optional[str] = None
+            reward:      float = 0.0
+            done:        bool  = False
 
             try:
-                result     = env_step(action)
-                reward_obj = result["reward"]
+                result      = env_step(action)
+                reward_obj  = result["reward"]
                 observation = result["observation"]
                 reward      = float(reward_obj.get("score", 0.0))
                 done        = bool(reward_obj.get("done", False))
@@ -304,16 +299,8 @@ def main() -> None:
     global ENV_BASE_URL
 
     parser = argparse.ArgumentParser(description="CSV Cleaner OpenEnv baseline agent")
-    parser.add_argument(
-        "--base-url",
-        default=ENV_BASE_URL,
-        help="Environment server base URL",
-    )
-    parser.add_argument(
-        "--task",
-        default=os.getenv("TASK_ID", ""),
-        help="Run a single task (task1/task2/task3). Default: all.",
-    )
+    parser.add_argument("--base-url", default=ENV_BASE_URL)
+    parser.add_argument("--task", default=os.getenv("TASK_ID", ""))
     args = parser.parse_args()
     ENV_BASE_URL = args.base_url.rstrip("/")
 
@@ -332,9 +319,6 @@ def main() -> None:
         task_ids = ["task1", "task2", "task3"]
 
     if args.task:
-        if args.task not in task_ids:
-            print(f"ERROR: Unknown task '{args.task}'.", file=sys.stderr)
-            sys.exit(1)
         task_ids = [args.task]
 
     scores: Dict[str, float] = {}
