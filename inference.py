@@ -24,6 +24,15 @@ import urllib.request
 import urllib.error
 from typing import Any, Dict, List, Optional
 
+import subprocess as _sp
+import sys as _sys
+for _pkg in ["openai"]:
+    try:
+        __import__(_pkg)
+    except ImportError:
+        _sp.check_call([_sys.executable, "-m", "pip", "install", _pkg, "-q",
+                        "--user", "--no-warn-script-location"])
+
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
