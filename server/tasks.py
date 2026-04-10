@@ -58,6 +58,11 @@ def _rows_as_frozensets(rows: List[Dict]) -> List[frozenset]:
     return [frozenset((k, str(v)) for k, v in row.items()) for row in rows]
 
 
+def _clamp_score(score: float) -> float:
+    """Clamp score to strictly within (0, 1) to satisfy validator requirements."""
+    return max(0.01, min(0.99, score))
+
+
 # ---------------------------------------------------------------------------
 # TASK 1 — Easy: Fill null values
 # ---------------------------------------------------------------------------
@@ -101,7 +106,7 @@ def grade_task1(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
     Each column contributes equally (1/3 of total score).
     """
     if not rows:
-        return 0.0, "No rows found."
+        return 0.01, "No rows found."
 
     cols = {
         "age":   {"fill": 0,                      "correct": 0, "total_nulls": 0},
@@ -127,13 +132,14 @@ def grade_task1(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
     details = []
     for col, cfg in cols.items():
         if cfg["total_nulls"] == 0:
-            scores.append(1.0)
+            scores.append(_clamp_score(1.0))
         else:
             s = cfg["correct"] / cfg["total_nulls"]
-            scores.append(s)
+            scores.append(_clamp_score(s))
             details.append(f"{col}: {cfg['correct']}/{cfg['total_nulls']} nulls fixed")
 
     final = sum(scores) / len(scores)
+    final = _clamp_score(final)
     reason = "; ".join(details) if details else "All nulls correctly filled."
     return round(final, 4), reason
 
@@ -186,7 +192,7 @@ def grade_task2(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
       3. Date normalize — all dates in YYYY-MM-DD format
     """
     if not rows:
-        return 0.0, "No rows found."
+        return 0.01, "No rows found."
 
     details = []
 
@@ -194,14 +200,14 @@ def grade_task2(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
     expected_count = len(TASK2_CLEAN)
     actual_count   = len(rows)
     if actual_count == expected_count:
-        dedup_score = 1.0
+        dedup_score = _clamp_score(1.0)
     elif actual_count < expected_count:
         # Penalise for removing too many rows
-        dedup_score = max(0.0, actual_count / expected_count)
+        dedup_score = _clamp_score(max(0.0, actual_count / expected_count))
     else:
         # Still has duplicates
         excess = actual_count - expected_count
-        dedup_score = max(0.0, 1.0 - (excess / len(TASK2_DIRTY)))
+        dedup_score = _clamp_score(max(0.0, 1.0 - (excess / len(TASK2_DIRTY))))
     details.append(f"dedup: {actual_count} rows (expected {expected_count})")
 
     # Build a lookup for unique order_ids present in agent rows
@@ -224,7 +230,7 @@ def grade_task2(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
                     null_fixed += 1
             except (TypeError, ValueError):
                 pass
-    null_score = null_fixed / len(null_ids) if null_ids else 1.0
+    null_score = _clamp_score(null_fixed / len(null_ids) if null_ids else 1.0)
     details.append(f"nulls fixed: {null_fixed}/{len(null_ids)}")
 
     # --- Component 3: Date normalization ---
@@ -237,10 +243,11 @@ def grade_task2(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
         parsed = _parse_date(agent_row.get("order_date"))
         if parsed == clean_row["order_date"]:
             date_correct += 1
-    date_score = date_correct / len(TASK2_CLEAN)
+    date_score = _clamp_score(date_correct / len(TASK2_CLEAN))
     details.append(f"dates normalized: {date_correct}/{len(TASK2_CLEAN)}")
 
     final = (dedup_score + null_score + date_score) / 3.0
+    final = _clamp_score(final)
     return round(final, 4), "; ".join(details)
 
 
@@ -301,7 +308,7 @@ def grade_task3(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
       6. Date normalization → YYYY-MM-DD
     """
     if not rows:
-        return 0.0, "No rows found."
+        return 0.01, "No rows found."
 
     details  = []
     agent_by_id: Dict[int, Dict] = {}
@@ -318,15 +325,15 @@ def grade_task3(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
     # --- 1. Deduplication ---
     expected_count = len(TASK3_CLEAN)
     actual_unique  = len(agent_by_id)
-    dedup_score    = 1.0 if actual_unique == expected_count else max(
+    dedup_score    = _clamp_score(1.0 if actual_unique == expected_count else max(
         0.0, 1.0 - abs(actual_unique - expected_count) / len(TASK3_DIRTY)
-    )
+    ))
     details.append(f"dedup: {actual_unique} unique rows (expected {expected_count})")
 
     # --- 2. Outlier removal (emp_id 4 salary=850000, emp_id 9 salary=-5000) ---
     outlier_ids      = {4, 9}
     outliers_removed = sum(1 for oid in outlier_ids if oid not in agent_by_id)
-    outlier_score    = outliers_removed / len(outlier_ids)
+    outlier_score    = _clamp_score(outliers_removed / len(outlier_ids))
     details.append(f"outliers removed: {outliers_removed}/{len(outlier_ids)}")
 
     # --- 3. Null salary fill ---
@@ -340,7 +347,7 @@ def grade_task3(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
                     salary_fixed += 1
             except (TypeError, ValueError):
                 pass
-    null_salary_score = salary_fixed / len(null_salary_ids)
+    null_salary_score = _clamp_score(salary_fixed / len(null_salary_ids))
     details.append(f"null salaries fixed: {salary_fixed}/{len(null_salary_ids)}")
 
     # --- 4. Null department fill ---
@@ -350,7 +357,7 @@ def grade_task3(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
         r = agent_by_id.get(eid)
         if r and str(r.get("department", "")).strip() == "General":
             dept_fixed += 1
-    null_dept_score = dept_fixed / len(null_dept_ids)
+    null_dept_score = _clamp_score(dept_fixed / len(null_dept_ids))
     details.append(f"null departments fixed: {dept_fixed}/{len(null_dept_ids)}")
 
     # --- 5. Phone normalization ---
@@ -362,7 +369,7 @@ def grade_task3(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
         clean_phone = _digits_only(clean_row["phone"])
         if agent_phone == clean_phone:
             phone_correct += 1
-    phone_score = phone_correct / len(checkable) if checkable else 0.0
+    phone_score = _clamp_score(phone_correct / len(checkable) if checkable else 0.0)
     details.append(f"phones normalized: {phone_correct}/{len(checkable)}")
 
     # --- 6. Date normalization ---
@@ -372,7 +379,7 @@ def grade_task3(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
         parsed = _parse_date(agent_row.get("join_date"))
         if parsed == clean_row["join_date"]:
             date_correct += 1
-    date_score = date_correct / len(checkable) if checkable else 0.0
+    date_score = _clamp_score(date_correct / len(checkable) if checkable else 0.0)
     details.append(f"dates normalized: {date_correct}/{len(checkable)}")
 
     components = [
@@ -380,6 +387,7 @@ def grade_task3(rows: List[Dict[str, Any]]) -> Tuple[float, str]:
         null_dept_score, phone_score, date_score,
     ]
     final = sum(components) / len(components)
+    final = _clamp_score(final)
     return round(final, 4), "; ".join(details)
 
 
