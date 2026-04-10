@@ -21,16 +21,21 @@ import sys
 # Install required packages before any imports (validator runs script directly)
 # ---------------------------------------------------------------------------
 def _install(pkg: str) -> None:
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", pkg, "-q",
-         "--no-warn-script-location"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", pkg, "-q",
+             "--no-warn-script-location"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"WARNING: Failed to install {pkg}: {e}", file=sys.stderr)
+        raise
 
 try:
     from openai import OpenAI
-except ImportError:
+except ImportError as e:
+    print(f"WARNING: OpenAI import failed: {e}. Attempting to install...", file=sys.stderr)
     _install("openai>=1.30.0")
     from openai import OpenAI
 
